@@ -1,0 +1,21 @@
+# Build / install artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
