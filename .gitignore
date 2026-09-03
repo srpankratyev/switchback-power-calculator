@@ -3,6 +3,8 @@ build/
 dist/
 *.egg-info/
 *.egg
+__pycache__/
+*.pyc
 
 # Test / tool caches
 .pytest_cache/

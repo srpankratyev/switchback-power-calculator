@@ -107,6 +107,33 @@ class TestVarianceShares:
     shares = estimate_variance_shares(pd.DataFrame(rows))
     assert shares.within_cell_variance_share > 0.9
 
+  def test_between_share_exact_under_negative_interaction(self):
+    """Regression: with unbalanced cells, SS_interaction can go negative,
+    which used to inflate between_cell_variance_share above the true
+    SS_cell / SS_total after the max(0, .) clamp and renormalization."""
+    rng = np.random.default_rng(29)
+    rows = []
+    for j in range(6):
+      cluster_effect = rng.normal(0, 40)
+      for h in range(5):
+        n = max(2, int(3 + 90 * (j * h) / (5 * 4)))
+        for y in rng.normal(100 + cluster_effect + 20.0 * h, 20.0, size=n):
+          rows.append({"cluster_id": j, "time_id": h, "outcome": y})
+    df = pd.DataFrame(rows)
+
+    shares = estimate_variance_shares(df)
+    assert shares.warnings
+    assert "negative" in shares.warnings[0].lower()
+
+    grand_mean = df["outcome"].mean()
+    total_ss = ((df["outcome"] - grand_mean) ** 2).sum()
+    agg_cell = df.groupby(["cluster_id", "time_id"])["outcome"].agg(["mean", "count"])
+    ss_cell = (agg_cell["count"] * (agg_cell["mean"] - grand_mean) ** 2).sum()
+    true_between = ss_cell / total_ss
+
+    assert shares.between_cell_variance_share == pytest.approx(true_between, rel=1e-12)
+    assert shares.within_cell_variance_share == pytest.approx(1.0 - true_between, rel=1e-12)
+
 
 class TestColumnCoercion:
   def test_mixed_int_and_string_cluster_ids_merge(self):
@@ -171,6 +198,28 @@ class TestDataCleaning:
   def test_min_cell_count_one_keeps_everything(self, imbalanced_frame):
     _, diagnostics = prepare_data(imbalanced_frame, min_cell_count=1)
     assert diagnostics.cells_before_filter == diagnostics.cells_after_filter
+
+  def test_compute_design_stats_accepts_custom_column_names(self, balanced_frame):
+    """Regression: compute_design_stats used to ignore cluster_col/time_col/
+    outcome_col and always look for the default column names."""
+    renamed = balanced_frame.rename(
+      columns={"cluster_id": "zone", "time_id": "hour", "outcome": "trips"}
+    )
+    design = compute_design_stats(
+      renamed, cluster_col="zone", time_col="hour", outcome_col="trips"
+    )
+    assert design.num_clusters == NUM_CLUSTERS_TRUE
+    assert design.num_time_periods == NUM_TIME_PERIODS_TRUE
+
+  def test_estimate_variance_shares_accepts_custom_column_names(self, imbalanced_frame):
+    renamed = imbalanced_frame.rename(
+      columns={"cluster_id": "zone", "time_id": "hour", "outcome": "trips"}
+    )
+    default_shares = estimate_variance_shares(imbalanced_frame)
+    renamed_shares = estimate_variance_shares(
+      renamed, cluster_col="zone", time_col="hour", outcome_col="trips"
+    )
+    assert renamed_shares == default_shares
 
 
 class TestEstimateDesignParameters:

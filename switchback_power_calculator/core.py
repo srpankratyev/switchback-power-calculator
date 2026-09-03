@@ -10,6 +10,8 @@ from switchback_power_calculator.types import (
   PowerInputs,
   PowerResult,
   VarianceResult,
+  validate_alpha,
+  validate_power_level,
   validate_variance_inputs,
 )
 
@@ -198,6 +200,8 @@ def mde(
   power_level: float = 0.8,
 ) -> float:
   """Minimum detectable effect at two-sided `alpha` and target `power_level`."""
+  validate_alpha(alpha)
+  validate_power_level(power_level)
   se = standard_error(
     num_clusters,
     num_time_periods,
@@ -223,8 +227,7 @@ def power(
   alpha: float = 0.05,
 ) -> float:
   """Two-sided power to detect `treatment_effect`. Sign does not matter."""
-  if treatment_effect == 0:
-    return alpha
+  validate_alpha(alpha)
   se = standard_error(
     num_clusters,
     num_time_periods,
@@ -234,6 +237,8 @@ def power(
     within_cell_variance_share=within_cell_variance_share,
     outcome_sd=outcome_sd,
   )
+  if treatment_effect == 0:
+    return alpha
   z_alpha = norm.ppf(1.0 - alpha / 2.0)
   z_stat = abs(treatment_effect) / se
   return float(1.0 - norm.cdf(z_alpha - z_stat) + norm.cdf(-z_alpha - z_stat))
@@ -253,6 +258,8 @@ def num_required_randomizations(
   """Required `num_clusters * num_time_periods` to detect `treatment_effect`."""
   if treatment_effect == 0:
     raise ValueError("treatment_effect must be non-zero.")
+  validate_alpha(alpha)
+  validate_power_level(power_level)
   between, within = validate_variance_inputs(
     mean_obs_per_cell,
     cell_size_cv,

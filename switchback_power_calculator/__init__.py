@@ -33,7 +33,6 @@ from switchback_power_calculator.types import (
 __version__ = "1.0.0"
 
 __all__ = [
-    "__version__",
     "ApproximationValidity",
     "DataDiagnostics",
     "DesignParameters",
@@ -42,6 +41,7 @@ __all__ = [
     "PowerResult",
     "VarianceResult",
     "VarianceShares",
+    "__version__",
     "compute_design_stats",
     "estimate_design_parameters_from_data",
     "estimate_variance_shares",

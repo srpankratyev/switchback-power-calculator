@@ -22,6 +22,18 @@ def resolve_variance_shares(
   return between_cell_variance_share, within_cell_variance_share
 
 
+def validate_alpha(alpha: float) -> None:
+  """Check the two-sided significance level shared by every power calculation."""
+  if not 0 < alpha < 1:
+    raise ValueError("alpha must lie strictly between 0 and 1.")
+
+
+def validate_power_level(power_level: float) -> None:
+  """Check the target power shared by every sample-size/MDE calculation."""
+  if not 0 < power_level < 1:
+    raise ValueError("power_level must lie strictly between 0 and 1.")
+
+
 def validate_variance_inputs(
   mean_obs_per_cell: float,
   cell_size_cv: float,
@@ -151,7 +163,16 @@ class DesignStats:
 
 @dataclass(frozen=True)
 class VarianceShares:
-  """ANOVA decomposition of outcome variance across design levels."""
+  """ANOVA decomposition of outcome variance across design levels.
+
+  `between_cell_variance_share` and `within_cell_variance_share` always sum
+  to 1 and are exact (they equal SS_cell/SS_total and its complement). The
+  cluster/time/interaction split of the between-cell share is descriptive
+  only: under unbalanced cell sizes the ANOVA partition is not orthogonal,
+  the interaction sum of squares can go negative, and after the
+  `max(S_int, 0)` clamp the three sub-shares may not sum exactly to
+  `between_cell_variance_share`.
+  """
 
   cluster_variance_share: float
   time_period_variance_share: float

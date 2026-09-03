@@ -137,16 +137,28 @@ def _compute_design_stats_from_clean(clean: pd.DataFrame) -> DesignStats:
   return DesignStats(
     num_clusters=num_clusters,
     num_time_periods=num_time_periods,
-    n_cells=int(len(cell_counts)),
+    n_cells=len(cell_counts),
     mean_obs_per_cell=mean_obs_per_cell,
     cell_size_cv=cell_size_cv,
-    n_observations=int(len(clean)),
+    n_observations=len(clean),
   )
 
 
-def compute_design_stats(df: pd.DataFrame, min_cell_count: int = 1) -> DesignStats:
+def compute_design_stats(
+  df: pd.DataFrame,
+  cluster_col: str = "cluster_id",
+  time_col: str = "time_id",
+  outcome_col: str = "outcome",
+  min_cell_count: int = 1,
+) -> DesignStats:
   """Count clusters, time periods, and cell sizes in the data."""
-  clean, _ = prepare_data(df, min_cell_count=min_cell_count)
+  clean, _ = prepare_data(
+    df,
+    cluster_col=cluster_col,
+    time_col=time_col,
+    outcome_col=outcome_col,
+    min_cell_count=min_cell_count,
+  )
   return _compute_design_stats_from_clean(clean)
 
 
@@ -170,7 +182,6 @@ def _estimate_variance_shares_from_clean(clean: pd.DataFrame) -> VarianceShares:
   )
   ss_cell = (agg_cell["count"] * (agg_cell["mean"] - grand_mean) ** 2).sum()
   ss_int = ss_cell - ss_cluster - ss_time
-  ss_res = total_ss - ss_cell
 
   warnings: list[str] = []
   if ss_int < -1e-9 * total_ss:
@@ -181,13 +192,8 @@ def _estimate_variance_shares_from_clean(clean: pd.DataFrame) -> VarianceShares:
   s_cl = float(ss_cluster / total_ss)
   s_time = float(ss_time / total_ss)
   s_int = float(max(ss_int, 0.0) / total_ss)
-  s_res = float(ss_res / total_ss)
-  s_macro = s_cl + s_time + s_int
-
-  total = s_macro + s_res
-  if abs(total - 1.0) > 1e-6:
-    s_macro /= total
-    s_res /= total
+  s_macro = float(ss_cell / total_ss)
+  s_res = 1.0 - s_macro
 
   return VarianceShares(
     cluster_variance_share=s_cl,
@@ -201,10 +207,20 @@ def _estimate_variance_shares_from_clean(clean: pd.DataFrame) -> VarianceShares:
 
 
 def estimate_variance_shares(
-  df: pd.DataFrame, min_cell_count: int = 1
+  df: pd.DataFrame,
+  cluster_col: str = "cluster_id",
+  time_col: str = "time_id",
+  outcome_col: str = "outcome",
+  min_cell_count: int = 1,
 ) -> VarianceShares:
   """Split outcome variance into between-cell and within-cell parts (layer 1)."""
-  clean, _ = prepare_data(df, min_cell_count=min_cell_count)
+  clean, _ = prepare_data(
+    df,
+    cluster_col=cluster_col,
+    time_col=time_col,
+    outcome_col=outcome_col,
+    min_cell_count=min_cell_count,
+  )
   return _estimate_variance_shares_from_clean(clean)
 
 

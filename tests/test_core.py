@@ -445,3 +445,34 @@ class TestInputValidation:
         within_cell_variance_share=0.9,
         outcome_sd=100.0,
       )
+
+  @pytest.mark.parametrize("alpha", [0.0, 1.0, -0.5, 1.5])
+  def test_invalid_alpha_rejected(self, alpha):
+    with pytest.raises(ValueError, match="alpha must lie strictly between 0 and 1"):
+      mde(100, 168, alpha=alpha, **PAPER)
+    with pytest.raises(ValueError, match="alpha must lie strictly between 0 and 1"):
+      power(100.0, 100, 168, alpha=alpha, **PAPER)
+    with pytest.raises(ValueError, match="alpha must lie strictly between 0 and 1"):
+      num_required_randomizations(100.0, alpha=alpha, **PAPER)
+
+  @pytest.mark.parametrize("power_level", [0.0, 1.0, -0.5, 1.5])
+  def test_invalid_power_level_rejected(self, power_level):
+    with pytest.raises(ValueError, match="power_level must lie strictly between 0 and 1"):
+      mde(100, 168, power_level=power_level, **PAPER)
+    with pytest.raises(ValueError, match="power_level must lie strictly between 0 and 1"):
+      num_required_randomizations(100.0, power_level=power_level, **PAPER)
+
+  def test_zero_effect_power_still_validates_other_inputs(self):
+    """Regression: `power` used to return `alpha` for a zero effect before
+    validating anything else, so invalid designs went undetected."""
+    with pytest.raises(ValueError, match="mean_obs_per_cell must be positive"):
+      power(
+        0.0,
+        -5,
+        0,
+        mean_obs_per_cell=-1.0,
+        cell_size_cv=-9.0,
+        between_cell_variance_share=7.0,
+        within_cell_variance_share=-6.0,
+        outcome_sd=-3.0,
+      )

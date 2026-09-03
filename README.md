@@ -57,7 +57,7 @@ result = summarize_power(
     outcome_sd=1000,
     treatment_effect=100,
 )
-print(result.standard_error, result.mde, result.power)
+print(round(result.standard_error, 2), round(result.mde, 2), round(result.power, 2))
 print(result.approximation_validity, result.warnings)
 ```
 
@@ -111,7 +111,21 @@ prepare_data(
     missing_fraction_warn=0.1,
 )  # -> (DataFrame, DataDiagnostics)
 
-estimate_variance_shares(df, min_cell_count=1)  # -> VarianceShares
+compute_design_stats(
+    df,
+    cluster_col="cluster_id",
+    time_col="time_id",
+    outcome_col="outcome",
+    min_cell_count=1,
+)  # -> DesignStats
+
+estimate_variance_shares(
+    df,
+    cluster_col="cluster_id",
+    time_col="time_id",
+    outcome_col="outcome",
+    min_cell_count=1,
+)  # -> VarianceShares
 
 estimate_design_parameters_from_data(
     df,
@@ -140,6 +154,27 @@ power_from_data(
 **Variance** (from known parameters)
 
 ```python
+estimator_variance(
+    num_clusters,
+    num_time_periods,
+    *,
+    mean_obs_per_cell,
+    cell_size_cv,
+    between_cell_variance_share,
+    within_cell_variance_share=None,
+    outcome_sd,
+)  # -> float, Var(tau_hat)
+
+standard_error(...)  # -> float, same signature as estimator_variance
+
+formula_approximation_validity(
+    num_clusters,
+    num_time_periods,
+    *,
+    mean_obs_per_cell,
+    cell_size_cv,
+)  # -> (ApproximationValidity, tuple[str, ...])
+
 summarize_estimator_variance(
     num_clusters,
     num_time_periods,
@@ -193,7 +228,8 @@ num_required_randomizations(
     outcome_sd,
     alpha=0.05,
     power_level=0.8,
-)  # -> float
+)  # -> float, required num_clusters * num_time_periods
+   # (this is what PowerResult.required_num_cells reports)
 
 summarize_power(
     num_clusters,
@@ -240,8 +276,8 @@ Var(τ̂) ≈ (4σ²/JH) × [ S_res/n̄ + S_macro × (1/n̄ + 1 + cv²) ]
 ## Assumptions
 
 - Cell-level 50/50 randomization; no stratification or blocking.
-- Cell size and cell-level outcome shocks are treated as unrelated. On real marketplace data the formula may understate variance — the NYC placebo study found ~17% underprediction on average. Consider inflating the reported SE by 10–20% when budgeting.
-- The formula degrades when `cell_size_cv ≥ 2` or `num_clusters × num_time_periods ≤ 10`. See `approximation_validity` and `warnings` on every `VarianceResult` / `PowerResult`.
+- Cell size and cell-level outcome shocks are treated as unrelated. On real marketplace data — where that independence is only approximate — the formula tends to *understate* variance: the NYC placebo study found ~17% underprediction on average. Consider inflating the reported SE by 10–20% when budgeting.
+- Separately, the formula tends to *overstate* variance for small or highly imbalanced designs (`cell_size_cv ≥ 2` or `num_clusters × num_time_periods ≤ 10`) — a different regime from the marketplace-data bias above. See `approximation_validity` and `warnings` on every `VarianceResult` / `PowerResult`.
 
 ## Tests
 
