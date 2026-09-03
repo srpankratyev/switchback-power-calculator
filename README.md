@@ -290,6 +290,6 @@ pytest
 
 ## Citation
 
-> Pankratev, S. (2026). *Powerful Switchback Experiments — Or Not?* arXiv:2606.03012. https://arxiv.org/abs/2606.03012
+> Pankratev, S. (2026). *Powerful Switchback Experiments – Or Not?* arXiv:2606.03012. https://arxiv.org/abs/2606.03012
 
 Replication code: https://github.com/srpankratyev/power_paper_repo_simulations_placebo
