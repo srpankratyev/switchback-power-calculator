@@ -105,6 +105,22 @@ def prepare_data(
   if len(keep_cells) == 0:
     raise ValueError("No cells remain after min_cell_count filter.")
 
+  grid_cells = (
+    keep_cells.get_level_values("cluster_id").nunique()
+    * keep_cells.get_level_values("time_id").nunique()
+  )
+  if len(keep_cells) < grid_cells:
+    absent = grid_cells - len(keep_cells)
+    reason = (
+      "have no observations or fall below min_cell_count"
+      if min_cell_count > 1
+      else "have no observations"
+    )
+    data_warnings.append(
+      f"{absent} of {grid_cells} cluster-time cells ({absent / grid_cells:.0%}) {reason}; "
+      f"only the {len(keep_cells)} cells present are counted as randomization units."
+    )
+
   filtered = (
     complete.set_index(["cluster_id", "time_id"])
     .loc[complete.set_index(["cluster_id", "time_id"]).index.isin(keep_cells)]
@@ -192,7 +208,24 @@ def _estimate_variance_shares_from_clean(clean: pd.DataFrame) -> VarianceShares:
   s_cl = float(ss_cluster / total_ss)
   s_time = float(ss_time / total_ss)
   s_int = float(max(ss_int, 0.0) / total_ss)
-  s_macro = float(ss_cell / total_ss)
+
+  # Between/within split: one-way ANOVA variance components with the cell as
+  # the group. Cell means carry within-cell noise, so SS_cell/SS_total
+  # overstates the between-cell share by about (1 - share) / mean cell size.
+  n_obs = len(clean)
+  n_cells = len(agg_cell)
+  size_term = n_obs - float((agg_cell["count"] ** 2).sum()) / n_obs
+  if n_obs > n_cells and size_term > 0:
+    var_within = max(float(total_ss - ss_cell), 0.0) / (n_obs - n_cells)
+    var_between = max(float(ss_cell) - (n_cells - 1) * var_within, 0.0) / size_term
+    s_macro = var_between / (var_between + var_within)
+  else:
+    s_macro = float(ss_cell / total_ss)
+    if n_obs == n_cells:
+      warnings.append(
+        "Every cell holds a single observation, so within-cell variance is not "
+        "identified; shares are the raw sum-of-squares split."
+      )
   s_res = 1.0 - s_macro
 
   return VarianceShares(
