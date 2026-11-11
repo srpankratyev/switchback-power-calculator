@@ -69,6 +69,7 @@ _PER_CLUSTER_FIELDS = (
   "m11",
   "m01",
 )
+_WEEK_MOMENT_FIELDS = ("m00_week", "m11_week", "m01_week")
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +176,13 @@ class ClusterLagMoments:
   window is its residual minus the cluster's mean residual per observation
   times its observation count.
 
+  The analysis centres each cluster over the experiment, so how much of a
+  cluster's week-to-week level shift counts as noise depends on how long the
+  experiment runs. The moments are therefore kept twice: with the mean taken
+  over the whole pre-period (`m00`, `m11`, `m01`) and with it taken within
+  each week of the pre-period (`m00_week`, `m11_week`, `m01_week`). `plan`
+  moves from the second to the first as the planned duration grows.
+
   Attributes:
     window_minutes: Length of the randomization window.
     base_minutes: Length of the base period.
@@ -201,6 +209,10 @@ class ClusterLagMoments:
       or "parameters".
     variance_factor: Factor applied to the three moments.
     warnings: Notes about the data behind the moments.
+    m00_week, m11_week, m01_week: The three moments with each cluster's mean
+      taken within each week of the pre-period (weeks counted from the first
+      window; windows after the last whole week join it). `None` on the
+      parameter route, where `plan` uses `m00`, `m11` and `m01` as they are.
   """
 
   window_minutes: float
@@ -221,11 +233,17 @@ class ClusterLagMoments:
   residual: str
   variance_factor: float
   warnings: tuple[str, ...] = ()
+  m00_week: np.ndarray | None = None
+  m11_week: np.ndarray | None = None
+  m01_week: np.ndarray | None = None
 
   def __post_init__(self) -> None:
     object.__setattr__(self, "cluster_ids", normalize_ids(self.cluster_ids))
     n = len(self.cluster_ids)
-    for name in _PER_CLUSTER_FIELDS:
+    given = [name for name in _WEEK_MOMENT_FIELDS if getattr(self, name) is not None]
+    if given and len(given) != len(_WEEK_MOMENT_FIELDS):
+      raise ValueError("m00_week, m11_week and m01_week must be given together.")
+    for name in (*_PER_CLUSTER_FIELDS, *given):
       array = read_only(getattr(self, name))
       if array.shape != (n,):
         raise ValueError(f"{name} must have one value per cluster ({n}); got shape {array.shape}.")
@@ -264,9 +282,37 @@ class ClusterLagMoments:
       raise ValueError("subset cluster ids must be distinct.")
     rows = np.array([position[cluster] for cluster in wanted], dtype=np.intp)
     changes: dict[str, object] = {name: getattr(self, name)[rows] for name in _PER_CLUSTER_FIELDS}
+    if self.m00_week is not None:
+      changes.update({name: getattr(self, name)[rows] for name in _WEEK_MOMENT_FIELDS})
     changes["position_share"] = self.position_share[rows]
     changes["cluster_ids"] = wanted
     return dataclasses.replace(self, **changes)
+
+  def moments_for(self, weeks: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(m00, m11, m01)` for an experiment of `weeks`.
+
+    Among W weeks whose level shifts are exchangeable, a share 1 - 1/W of
+    their variance is left after centring over the W weeks. The within-week
+    moments (W = 1) and the whole-pre-period moments (W = the pre-period's
+    K weeks) are joined on that scale:
+
+      m(W) = m_week + s (m - m_week),  s = (1 - 1/W) / (1 - 1/K), kept in [0, 1]
+
+    A one-week experiment gets the within-week moments, and an experiment as
+    long as the pre-period or longer gets the whole-pre-period moments: the
+    pre-period holds no evidence about variation slower than itself.
+    """
+    if self.m00_week is None:
+      return self.m00, self.m11, self.m01
+    pre = self.pre_period_weeks
+    if not pre > 1.0 or weeks >= pre:
+      return self.m00, self.m11, self.m01
+    share = min(max((1.0 - 1.0 / float(weeks)) / (1.0 - 1.0 / pre), 0.0), 1.0)
+    return (
+      self.m00_week + share * (self.m00 - self.m00_week),
+      self.m11_week + share * (self.m11 - self.m11_week),
+      self.m01_week + share * (self.m01 - self.m01_week),
+    )
 
   def plan(self, weeks: float, *, se_inflation: float = 1.0) -> PlannedCovariance:
     """Planned variances of the lag estimates for an experiment of `weeks`.
@@ -280,7 +326,10 @@ class ClusterLagMoments:
       V01 = 4 m01 / (H p nbar nbar1)        * sqrt(f0 f1)
 
     where f is the second-order term for the random number of observations
-    in each arm. Gaps are assumed to recur at the pre-period rate.
+    in each arm. Gaps are assumed to recur at the pre-period rate. The
+    moments are those of an experiment of this length (`moments_for`): a
+    cluster's week-to-week level shift is noise only as far as the experiment
+    spans more than one week.
 
     Args:
       weeks: Planned duration; the experiment must span at least two windows.
@@ -302,10 +351,11 @@ class ClusterLagMoments:
     f0 = 1.0 + 2.0 * self.count_sq_ratio / windows
     f1 = 1.0 + 2.0 * self.count_sq_ratio_lag / lag_windows
     scale = float(se_inflation) ** 2
-    v00 = 4.0 * self.m00 / (windows * self.mean_count**2) * f0 * scale
-    v11 = 4.0 * self.m11 / (lag_windows * self.mean_count_lag**2) * f1 * scale
+    m00, m11, m01 = self.moments_for(weeks)
+    v00 = 4.0 * m00 / (windows * self.mean_count**2) * f0 * scale
+    v11 = 4.0 * m11 / (lag_windows * self.mean_count_lag**2) * f1 * scale
     v01 = (
-      4.0 * self.m01 / (windows * self.mean_count * self.mean_count_lag)
+      4.0 * m01 / (windows * self.mean_count * self.mean_count_lag)
       * np.sqrt(f0 * f1) * scale
     )
     planned_counts = self.presence * self.mean_count
@@ -892,6 +942,19 @@ def lag_moments_from_aggregates(
     m00 = per_cluster(score**2) / n_present * factor
     m11 = per_cluster(score[at] ** 2, at) / n_lag * factor
     m01 = per_cluster(score[at - 1] * score[at], at) / n_lag * factor
+    # The same three moments with the mean taken within each week of the
+    # pre-period. Windows after the last whole week join that week.
+    per_week = int(round(WEEK_MINUTES / float(window_minutes)))
+    n_weeks = max(1, nominal // per_week)
+    week = np.minimum((windows.window - windows.window.min()) // per_week, n_weeks - 1)
+    cell = cluster * n_weeks + week
+    cell_count = np.bincount(cell, weights=count, minlength=n_input * n_weeks)
+    cell_residual = np.bincount(cell, weights=residual_sum, minlength=n_input * n_weeks)
+    cell_centre = np.where(cell_count > 0, cell_residual / cell_count, 0.0)
+    score_week = residual_sum - cell_centre[cell] * count
+    m00_week = per_cluster(score_week**2) / n_present * factor
+    m11_week = per_cluster(score_week[at] ** 2, at) / n_lag * factor
+    m01_week = per_cluster(score_week[at - 1] * score_week[at], at) / n_lag * factor
     count_sq_ratio = per_cluster(count**2) / n_present / mean_count**2
     count_sq_ratio_lag = per_cluster(count[at] ** 2, at) / n_lag / mean_count_lag**2
     position_totals = np.zeros((n_input, rows.k))
@@ -938,6 +1001,9 @@ def lag_moments_from_aggregates(
     residual=residual,
     variance_factor=factor,
     warnings=tuple(dict.fromkeys(notes)),
+    m00_week=m00_week[keep],
+    m11_week=m11_week[keep],
+    m01_week=m01_week[keep],
   )
 
 

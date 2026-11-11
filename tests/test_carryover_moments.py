@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from switchback_power_calculator import core
+from switchback_power_calculator.carryover.estimate import estimate_lags, experiment_windows
 from switchback_power_calculator.carryover.examples import synthetic_panel
 from switchback_power_calculator.carryover.moments import (
   ClusterLagMoments,
@@ -37,6 +38,9 @@ MOMENT_FIELDS = (
   "m11",
   "m01",
   "position_share",
+  "m00_week",
+  "m11_week",
+  "m01_week",
 )
 PARAMETERS = dict(
   mean_obs_per_cell=37.5,
@@ -185,6 +189,20 @@ def moments_for(seed: int, weeks: int, gap_share: float, window_minutes: int) ->
   )
 
 
+def without_week_moments(moments: ClusterLagMoments) -> ClusterLagMoments:
+  """The moments as they were before the within-week centring: one mean per cluster."""
+  return dataclasses.replace(moments, m00_week=None, m11_week=None, m01_week=None)
+
+
+def with_week_shifts(df: pd.DataFrame, sd: float, seed: int) -> pd.DataFrame:
+  """Add a level per (cluster, week) to every unit's outcome."""
+  hours = ((df["period_start"] - df["period_start"].min()) / HOUR).round().astype(int)
+  cluster = pd.factorize(df["cluster_id"])[0]
+  week = (hours // 168).to_numpy()
+  shift = np.random.default_rng(seed).normal(0.0, sd, (cluster.max() + 1, week.max() + 1))
+  return df.assign(numerator=df["numerator"] + shift[cluster, week] * df["denominator"])
+
+
 def without_finite_sample_factor(moments: ClusterLagMoments) -> ClusterLagMoments:
   zeros = np.zeros(moments.num_clusters)
   return dataclasses.replace(moments, count_sq_ratio=zeros, count_sq_ratio_lag=zeros)
@@ -232,14 +250,25 @@ class TestPlannedCovarianceAgainstRerandomisation:
     """One-week SEs on the default panel, next to the design document's figures."""
     origin = default_panel["period_start"].min()
     measured = {}
+    whole_period = {}
     for window_minutes in (60, 120, 240):
-      plan = lag_moments_from_aggregates(
+      moments = lag_moments_from_aggregates(
         default_panel, expected_col="expected", window_minutes=window_minutes, origin=origin
-      ).plan(1)
+      )
+      plan = moments.plan(1)
       measured[window_minutes] = (plan.se_l0, plan.se_l0_plus_l1, plan.corr_l0_l1)
+      plan = without_week_moments(moments).plan(1)
+      whole_period[window_minutes] = (plan.se_l0, plan.se_l0_plus_l1, plan.corr_l0_l1)
 
     # This implementation, to guard against drift.
     pinned = {
+      60: (0.030225, 0.050660, 0.3939),
+      120: (0.036189, 0.059674, 0.3393),
+      240: (0.042969, 0.067714, 0.2077),
+    }
+    # The same with each cluster centred over all four weeks, which is what
+    # the design document's prototype did.
+    pinned_whole_period = {
       60: (0.030572, 0.051471, 0.4065),
       120: (0.036767, 0.061058, 0.3577),
       240: (0.043969, 0.070158, 0.2359),
@@ -254,9 +283,47 @@ class TestPlannedCovarianceAgainstRerandomisation:
       assert se_l0 == pytest.approx(pinned[window_minutes][0], rel=2e-4)
       assert se_sum == pytest.approx(pinned[window_minutes][1], rel=2e-4)
       assert corr == pytest.approx(pinned[window_minutes][2], abs=2e-4)
+    for window_minutes, (se_l0, se_sum, corr) in whole_period.items():
+      assert se_l0 == pytest.approx(pinned_whole_period[window_minutes][0], rel=2e-4)
+      assert se_sum == pytest.approx(pinned_whole_period[window_minutes][1], rel=2e-4)
+      assert corr == pytest.approx(pinned_whole_period[window_minutes][2], abs=2e-4)
       assert se_l0 == pytest.approx(printed[window_minutes][0], abs=5e-5)
       assert se_sum == pytest.approx(printed[window_minutes][1], rel=0.005)
       assert corr == pytest.approx(printed[window_minutes][2], abs=0.005)
+
+  @pytest.mark.parametrize("window_minutes", [60, 240])
+  def test_one_week_plan_ignores_week_level_shifts(self, window_minutes):
+    """A cluster's level moves from week to week; a one-week analysis never sees that."""
+    panel = with_week_shifts(synthetic_panel(120, 4, seed=7, gap_share=0.01), sd=1.5, seed=5)
+    origin = panel["period_start"].min()
+    moments = lag_moments_from_aggregates(
+      panel, expected_col="expected", window_minutes=window_minutes, origin=origin
+    )
+    whole_period = without_week_moments(moments)
+    hours = ((panel["period_start"] - origin) / HOUR).round().astype(int)
+    rng = np.random.default_rng(0)
+    for weeks in (1, 2, 4):
+      reported = []
+      for first in range(0, 4, weeks):
+        part = panel[(hours >= 168 * first) & (hours < 168 * (first + weeks))]
+        window = ((part["period_start"] - origin) / HOUR).round().astype(int) // (window_minutes // 60)
+        key = pd.factorize(part["cluster_id"])[0] * 10_000 + window
+        coins = rng.integers(0, 2, int(key.max()) + 1)
+        assignment = part[["cluster_id", "period_start"]].assign(treated=coins[key])
+        est = estimate_lags(
+          experiment_windows(part, assignment, window_minutes=window_minutes, origin=origin, expected_col="expected"),
+          window_minutes=window_minutes,
+        )
+        assert est.cluster_ids == moments.cluster_ids
+        reported.append(np.sum(est.weights**2 * (est.s00 + 2 * est.s01 + est.s11)))
+      reported_se = math.sqrt(np.mean(reported))
+      planned = moments.plan(weeks).se_l0_plus_l1 / reported_se
+      uncentred = whole_period.plan(weeks).se_l0_plus_l1 / reported_se
+      assert 0.97 < planned < 1.02, (weeks, planned)
+      if weeks == 1:
+        assert uncentred > 1.15
+      if weeks == 4:
+        assert planned == pytest.approx(uncentred)
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +393,56 @@ class TestMoments:
       shifted, expected_col="expected", window_minutes=120, origin=origin
     )
     assert_same_moments(base, moved, rel=1e-7)
+
+  def test_week_moments_centre_within_each_week(self):
+    panel = synthetic_panel(12, 3, seed=2)
+    origin = panel["period_start"].min()
+    kwargs = dict(expected_col="expected", window_minutes=120, origin=origin)
+    base = lag_moments_from_aggregates(panel, **kwargs)
+    moved = lag_moments_from_aggregates(with_week_shifts(panel, sd=4.0, seed=3), **kwargs)
+    for name in ("m00_week", "m11_week", "m01_week"):
+      np.testing.assert_allclose(getattr(moved, name), getattr(base, name), rtol=1e-7, err_msg=name)
+    assert np.all(moved.m00 > base.m00)
+
+    # By hand for one cluster: residual minus the week's own mean per unit times the count.
+    totals = complete_windows(panel, 120, origin)
+    one = totals[totals["cluster_id"] == "c004"].sort_values("window")
+    week = one["window"] // 84
+    centre = one.groupby(week)["residual"].transform("sum") / one.groupby(week)["count"].transform("sum")
+    score = (one["residual"] - centre * one["count"]).to_numpy()
+    i = base.cluster_ids.index("c004")
+    assert base.m00_week[i] == pytest.approx(np.mean(score**2))
+    lag = np.flatnonzero(np.diff(one["window"].to_numpy()) == 1) + 1
+    assert 0 < len(lag) < len(score) - 1  # the panel has gaps
+    assert base.m11_week[i] == pytest.approx(np.mean(score[lag] ** 2))
+    assert base.m01_week[i] == pytest.approx(np.mean(score[lag] * score[lag - 1]))
+
+  def test_week_moments_equal_the_others_on_one_week(self, small_panel):
+    moments = lag_moments_from_aggregates(
+      small_panel, expected_col="expected", window_minutes=120, origin=small_panel["period_start"].min()
+    )
+    for name in ("m00", "m11", "m01"):
+      np.testing.assert_allclose(getattr(moments, f"{name}_week"), getattr(moments, name), rtol=1e-12)
+
+  def test_hours_after_the_last_whole_week_join_it(self):
+    panel = synthetic_panel(12, 3, seed=2)
+    origin = panel["period_start"].min()
+    hours = ((panel["period_start"] - origin) / HOUR).round().astype(int)
+    panel = panel[hours < 168 * 2 + 72]
+    hours = hours[hours < 168 * 2 + 72]
+    kwargs = dict(expected_col="expected", window_minutes=60, origin=origin)
+    base = lag_moments_from_aggregates(panel, **kwargs)
+    # Two blocks: week 0, and week 1 together with the three days after it.
+    level = np.where(hours < 168, 5.0, -3.0)
+    moved = lag_moments_from_aggregates(
+      panel.assign(numerator=panel["numerator"] + level * panel["denominator"]), **kwargs
+    )
+    np.testing.assert_allclose(moved.m00_week, base.m00_week, rtol=1e-7)
+    late = np.where(hours < 168 * 2, 0.0, 6.0)
+    split = lag_moments_from_aggregates(
+      panel.assign(numerator=panel["numerator"] + late * panel["denominator"]), **kwargs
+    )
+    assert np.all(split.m00_week > base.m00_week)
 
   def test_partial_window_is_absent(self):
     counts = {"a": [2, 3] * 20, "b": [4, 1] * 20}
@@ -716,6 +833,35 @@ class TestPlan:
     with pytest.raises(ValueError, match="finite"):
       plan.contrast_se(float("nan"))
 
+  def test_moments_for_a_duration(self):
+    panel = with_week_shifts(synthetic_panel(12, 4, seed=1), sd=3.0, seed=2)
+    moments = lag_moments_from_aggregates(
+      panel, expected_col="expected", window_minutes=240, origin=panel["period_start"].min()
+    )
+    assert moments.pre_period_weeks == pytest.approx(4.0)
+    week = (moments.m00_week, moments.m11_week, moments.m01_week)
+    whole = (moments.m00, moments.m11, moments.m01)
+    for weeks, share in ((0.5, 0.0), (1, 0.0), (2, (1 - 1 / 2) / (1 - 1 / 4)), (3, (1 - 1 / 3) / (1 - 1 / 4)), (4, 1.0), (9, 1.0)):
+      for got, a, b in zip(moments.moments_for(weeks), week, whole):
+        np.testing.assert_allclose(got, a + share * (b - a), rtol=1e-12)
+    # The planned variance uses them.
+    one, four = moments.plan(1), moments.plan(4)
+    horizon = 10080 / 240
+    f0 = 1 + 2 * moments.count_sq_ratio / (horizon * moments.presence)
+    np.testing.assert_allclose(
+      one.v00, 4 * moments.m00_week / (horizon * moments.presence * moments.mean_count**2) * f0
+    )
+    assert one.se_l0 < without_week_moments(moments).plan(1).se_l0
+    assert four.se_l0 == without_week_moments(moments).plan(4).se_l0
+
+    part = moments.subset(moments.cluster_ids[2:5])
+    np.testing.assert_array_equal(part.m00_week, moments.m00_week[2:5])
+    np.testing.assert_array_equal(part.m01_week, moments.m01_week[2:5])
+    with pytest.raises(ValueError, match="given together"):
+      dataclasses.replace(moments, m11_week=None)
+    with pytest.raises(ValueError, match="one value per cluster"):
+      dataclasses.replace(moments, m00_week=moments.m00_week[:-1])
+
   def test_se_inflation_and_duration(self, moments):
     base = moments.plan(2)
     inflated = moments.plan(2, se_inflation=1.3)
@@ -793,6 +939,10 @@ class TestParameterRoute:
     np.testing.assert_allclose(moments.m01, 0.25 * moments.m00)
     np.testing.assert_array_equal(moments.m11, moments.m00)
     assert moments.subset(["3", 5]).cluster_ids == ("3", "5")
+    # No pre-period, so no within-week moments: every duration plans from the same ones.
+    assert moments.m00_week is None and moments.subset(["3", 5]).m00_week is None
+    assert moments.moments_for(1)[0] is moments.m00
+    assert moments.plan(1).se_l0 == pytest.approx(2 * moments.plan(4).se_l0)
 
   def test_parameter_route_validation(self):
     for rho in (-1.0, 1.0, float("nan")):

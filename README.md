@@ -368,6 +368,7 @@ results["moment_bound_floored"].improves
 
 - `C` is an assumption; the pre-period cannot estimate it. For windows longer than the base period the planner converts it with a geometric rule that needs each later lag to be at most `C / (1 + C)` times the one before.
 - Planned SEs assume the experiment is as noisy as the pre-period. The "if noise +20%" column is a budget, in line with the advice above to inflate the SE by 10–20%.
+- A cluster's level drifts from week to week. The analysis centres each cluster over the experiment, so a one-week experiment never sees that drift and a longer one sees part of it. The planner reads the noise off the pre-period both ways, within each week and over the whole pre-period, and joins the two by the planned duration (`ClusterLagMoments.moments_for`). An experiment longer than the pre-period is planned as if it were as long as the pre-period, so give the planner at least as many weeks as you intend to run.
 - Planned power is slightly optimistic with few windows per cluster (flagged below 50). Treat differences under about 0.05 power or one week between window choices as ties.
 - Each test keeps its false-improvement rate only under its own assumption, and reporting whichever test passes does not. Choose one test before the experiment.
 
