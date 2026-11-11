@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+New experimental subpackage `switchback_power_calculator.carryover` for experiments whose treatment effects continue into later periods. It plans how many weeks each of six tests needs at each window length (`lag_moments_from_aggregates`, `compare_designs`) and runs those tests on a finished experiment (`experiment_windows`, `estimate_lags`, `run_tests`). The top-level package does not import it, and nothing in the existing API changes.
+
 Fixes to the data API. Results from `estimate_design_parameters_from_data` and `power_from_data` change for incomplete grids and for small cells; the parameter API is unchanged.
 
 - Incomplete grids: the variance was divided by `num_clusters × num_time_periods` even when some of those cells held no data (empty, or dropped by `min_cell_count`), which understated the standard error by the square root of the grid fill fraction. It is now divided by the number of cells present. `DesignStats` gains `grid_fill_fraction` and `effective_num_time_periods`, `DesignParameters.summarize_kwargs()` passes the effective period count, and `DataDiagnostics.warnings` reports absent cells.
