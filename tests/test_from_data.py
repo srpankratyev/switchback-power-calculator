@@ -11,6 +11,7 @@ from switchback_power_calculator import (
     estimate_variance_shares,
     power_from_data,
     prepare_data,
+    summarize_estimator_variance,
     summarize_estimator_variance_from_design,
     summarize_power_from_design,
 )
@@ -107,10 +108,11 @@ class TestVarianceShares:
     shares = estimate_variance_shares(pd.DataFrame(rows))
     assert shares.within_cell_variance_share > 0.9
 
-  def test_between_share_exact_under_negative_interaction(self):
+  def test_between_share_unaffected_by_negative_interaction(self):
     """Regression: with unbalanced cells, SS_interaction can go negative,
-    which used to inflate between_cell_variance_share above the true
-    SS_cell / SS_total after the max(0, .) clamp and renormalization."""
+    and the max(0, .) clamp on it used to leak into
+    between_cell_variance_share. The between/within split must depend only
+    on the cell-level decomposition (one-way ANOVA variance components)."""
     rng = np.random.default_rng(29)
     rows = []
     for j in range(6):
@@ -129,10 +131,62 @@ class TestVarianceShares:
     total_ss = ((df["outcome"] - grand_mean) ** 2).sum()
     agg_cell = df.groupby(["cluster_id", "time_id"])["outcome"].agg(["mean", "count"])
     ss_cell = (agg_cell["count"] * (agg_cell["mean"] - grand_mean) ** 2).sum()
-    true_between = ss_cell / total_ss
+    n_obs, n_cells = len(df), len(agg_cell)
+    var_within = (total_ss - ss_cell) / (n_obs - n_cells)
+    var_between = (ss_cell - (n_cells - 1) * var_within) / (
+      n_obs - (agg_cell["count"] ** 2).sum() / n_obs
+    )
+    expected_between = var_between / (var_between + var_within)
 
-    assert shares.between_cell_variance_share == pytest.approx(true_between, rel=1e-12)
-    assert shares.within_cell_variance_share == pytest.approx(1.0 - true_between, rel=1e-12)
+    assert shares.between_cell_variance_share == pytest.approx(expected_between, rel=1e-12)
+    assert shares.within_cell_variance_share == pytest.approx(
+      1.0 - expected_between, rel=1e-12
+    )
+
+  @pytest.mark.parametrize("cell_size", [2, 5, 20])
+  def test_between_share_recovers_known_components(self, cell_size):
+    """Regression: SS_cell / SS_total counts the within-cell noise in the
+    cell means as between-cell variance, overstating the share by about
+    (1 - share) / cell_size (0.60 instead of 0.20 at two observations per
+    cell), which inflated the standard error for sparse cells."""
+    rng = np.random.default_rng(11)
+    num_clusters, num_time_periods = 40, 60
+    cell_shock = rng.normal(0.0, 1.0, size=(num_clusters, num_time_periods))
+    cluster, period = np.meshgrid(
+      np.arange(num_clusters), np.arange(num_time_periods), indexing="ij"
+    )
+    cluster = np.repeat(cluster.ravel(), cell_size)
+    period = np.repeat(period.ravel(), cell_size)
+    outcome = cell_shock[cluster, period] + rng.normal(0.0, 2.0, size=len(cluster))
+    df = pd.DataFrame({"cluster_id": cluster, "time_id": period, "outcome": outcome})
+
+    shares = estimate_variance_shares(df)
+    assert shares.between_cell_variance_share == pytest.approx(0.20, abs=0.03)
+    assert shares.warnings == ()
+
+  def test_pure_noise_in_small_cells_has_no_between_share(self):
+    rng = np.random.default_rng(5)
+    df = pd.DataFrame(
+      {
+        "cluster_id": np.repeat(np.arange(50), 80),
+        "time_id": np.tile(np.repeat(np.arange(40), 2), 50),
+        "outcome": rng.normal(0.0, 1.0, size=50 * 80),
+      }
+    )
+    assert estimate_variance_shares(df).between_cell_variance_share < 0.03
+
+  def test_single_observation_cells_fall_back_to_raw_split(self):
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame(
+      {
+        "cluster_id": np.repeat(np.arange(6), 5),
+        "time_id": np.tile(np.arange(5), 6),
+        "outcome": rng.normal(0.0, 1.0, size=30),
+      }
+    )
+    shares = estimate_variance_shares(df)
+    assert shares.between_cell_variance_share == pytest.approx(1.0)
+    assert any("single observation" in warning for warning in shares.warnings)
 
 
 class TestColumnCoercion:
@@ -285,6 +339,104 @@ class TestPowerFromData:
     ]
     result, _, _ = power_from_data(pd.DataFrame(rows))
     assert result.approximation_validity == "approximation inaccurate"
+
+
+def _cell_frame(rng, sizes: np.ndarray) -> pd.DataFrame:
+  """Observation-level frame for a grid of cell sizes (0 = empty cell):
+  unit-variance cell shocks plus within-cell noise with SD 2."""
+  cluster, period = np.nonzero(sizes)
+  reps = sizes[cluster, period]
+  shock = rng.normal(0.0, 1.0, size=sizes.shape)
+  cluster, period = np.repeat(cluster, reps), np.repeat(period, reps)
+  outcome = shock[cluster, period] + rng.normal(0.0, 2.0, size=len(cluster))
+  return pd.DataFrame({"cluster_id": cluster, "time_id": period, "outcome": outcome})
+
+
+def _placebo_standard_error(df: pd.DataFrame, rng, draws: int = 4000) -> float:
+  """SD of the difference in means when the cells present in `df` are
+  re-randomized 50/50, holding outcomes fixed."""
+  cells = df.groupby(["cluster_id", "time_id"])["outcome"].agg(["sum", "count"])
+  total, count = cells["sum"].to_numpy(), cells["count"].to_numpy()
+  treated = rng.random((draws, len(cells))) < 0.5
+  diff = (treated @ total) / (treated @ count) - (~treated @ total) / (~treated @ count)
+  return float(diff.std(ddof=1))
+
+
+class TestIncompleteGrid:
+  """Regression: the variance was divided by num_clusters * num_time_periods
+  even when many of those cells held no data (empty, or dropped by
+  min_cell_count), while cell size and CV came from the cells present. The
+  standard error came out too small by sqrt(grid fill fraction)."""
+
+  NUM_CLUSTERS, NUM_TIME_PERIODS = 30, 48
+
+  def _sizes(self, rng, keep: float) -> np.ndarray:
+    sizes = rng.poisson(40, size=(self.NUM_CLUSTERS, self.NUM_TIME_PERIODS)) + 1
+    return np.where(rng.random(sizes.shape) < keep, sizes, 0)
+
+  def test_complete_grid_passes_integer_period_count(self):
+    rng = np.random.default_rng(0)
+    parameters, diagnostics = estimate_design_parameters_from_data(
+      _cell_frame(rng, self._sizes(rng, keep=1.0))
+    )
+    assert parameters.design.grid_fill_fraction == 1.0
+    assert parameters.summarize_kwargs()["num_time_periods"] == self.NUM_TIME_PERIODS
+    assert isinstance(parameters.summarize_kwargs()["num_time_periods"], int)
+    assert diagnostics.warnings == ()
+
+  def test_empty_cells_are_not_counted_as_randomizations(self):
+    rng = np.random.default_rng(1)
+    df = _cell_frame(rng, self._sizes(rng, keep=0.4))
+    parameters, diagnostics = estimate_design_parameters_from_data(df)
+    design = parameters.design
+
+    assert design.num_clusters == self.NUM_CLUSTERS
+    assert design.num_time_periods == self.NUM_TIME_PERIODS
+    assert design.n_cells < design.num_clusters * design.num_time_periods
+    assert design.grid_fill_fraction == pytest.approx(0.4, abs=0.05)
+    assert design.effective_num_time_periods == pytest.approx(
+      design.n_cells / design.num_clusters
+    )
+    assert len(diagnostics.warnings) == 1
+    assert "have no observations" in diagnostics.warnings[0]
+
+    result = summarize_estimator_variance_from_design(parameters)
+    full_grid = summarize_estimator_variance(
+      **{**parameters.summarize_kwargs(), "num_time_periods": design.num_time_periods}
+    )
+    assert result.variance == pytest.approx(
+      full_grid.variance / design.grid_fill_fraction, rel=1e-12
+    )
+
+  @pytest.mark.parametrize("keep", [1.0, 0.7, 0.4])
+  def test_standard_error_matches_placebo_rerandomization(self, keep):
+    rng = np.random.default_rng(2)
+    df = _cell_frame(rng, self._sizes(rng, keep=keep))
+    result, _, _ = power_from_data(df)
+    assert result.standard_error == pytest.approx(
+      _placebo_standard_error(df, rng), rel=0.08
+    )
+
+  def test_min_cell_count_drops_cells_from_the_randomization_count(self):
+    rng = np.random.default_rng(4)
+    sizes = np.maximum(
+      1, np.rint(rng.lognormal(2.5, 1.0, size=(self.NUM_CLUSTERS, self.NUM_TIME_PERIODS)))
+    ).astype(int)
+    df = _cell_frame(rng, sizes)
+
+    result, parameters, diagnostics = power_from_data(df, min_cell_count=10)
+    design = parameters.design
+    assert diagnostics.cells_after_filter == design.n_cells
+    assert design.n_cells < diagnostics.cells_before_filter
+    assert parameters.summarize_kwargs()["num_time_periods"] == pytest.approx(
+      design.n_cells / design.num_clusters
+    )
+    assert any("min_cell_count" in warning for warning in diagnostics.warnings)
+
+    kept = df.groupby(["cluster_id", "time_id"]).filter(lambda cell: len(cell) >= 10)
+    assert result.standard_error == pytest.approx(
+      _placebo_standard_error(kept, rng), rel=0.08
+    )
 
 
 class TestErrorPaths:

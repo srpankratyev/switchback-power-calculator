@@ -151,7 +151,15 @@ class PowerResult:
 
 @dataclass(frozen=True)
 class DesignStats:
-  """Cluster/time counts and cell-size shape read off the data."""
+  """Cluster/time counts and cell-size shape read off the data.
+
+  `n_cells` counts the cluster-time cells that hold observations, and
+  `mean_obs_per_cell` and `cell_size_cv` describe those cells only. When the
+  grid is incomplete (some cells are empty, or were dropped by
+  `min_cell_count`), `n_cells` is smaller than
+  `num_clusters * num_time_periods` and only the cells present count as
+  randomization units; see `effective_num_time_periods`.
+  """
 
   num_clusters: int
   num_time_periods: int
@@ -160,18 +168,40 @@ class DesignStats:
   cell_size_cv: float
   n_observations: int
 
+  @property
+  def grid_fill_fraction(self) -> float:
+    """Share of the `num_clusters * num_time_periods` grid that holds data."""
+    return self.n_cells / (self.num_clusters * self.num_time_periods)
+
+  @property
+  def effective_num_time_periods(self) -> float:
+    """Cells present per cluster, `n_cells / num_clusters`.
+
+    Equals `num_time_periods` on a complete grid. The variance formula
+    divides by the number of randomized cells, so this is the period count
+    to pass with `num_clusters` when some cells are missing.
+    """
+    if self.n_cells == self.num_clusters * self.num_time_periods:
+      return self.num_time_periods
+    return self.n_cells / self.num_clusters
+
 
 @dataclass(frozen=True)
 class VarianceShares:
-  """ANOVA decomposition of outcome variance across design levels.
+  """Decomposition of outcome variance across design levels.
 
   `between_cell_variance_share` and `within_cell_variance_share` always sum
-  to 1 and are exact (they equal SS_cell/SS_total and its complement). The
-  cluster/time/interaction split of the between-cell share is descriptive
-  only: under unbalanced cell sizes the ANOVA partition is not orthogonal,
-  the interaction sum of squares can go negative, and after the
-  `max(S_int, 0)` clamp the three sub-shares may not sum exactly to
-  `between_cell_variance_share`.
+  to 1. They are the one-way ANOVA variance-component estimates (cell as the
+  group), which remove the within-cell noise that sits in the cell means:
+  the raw sum-of-squares ratio SS_cell/SS_total overstates the between-cell
+  share by about `(1 - share) / mean_obs_per_cell`. When every cell holds a
+  single observation the within-cell variance is not identified, so the raw
+  ratio is returned with a warning.
+
+  The cluster/time/interaction split is descriptive only. It is the raw
+  sum-of-squares partition, so under unbalanced cell sizes it is not
+  orthogonal, the interaction term can go negative (clamped at zero), and
+  the three sub-shares need not sum to `between_cell_variance_share`.
   """
 
   cluster_variance_share: float
@@ -188,8 +218,9 @@ class DesignParameters:
   """All formula inputs inferred from a pre-period extract.
 
   Bundles design counts and cell-size stats (`design`) with the variance
-  decomposition (`shares`). Pass to `summarize_power_from_design` or unpack
-  into `summarize_power`.
+  decomposition (`shares`). Pass to `summarize_power_from_design`, or unpack
+  into `summarize_power` with `summarize_kwargs()`, which passes the number
+  of periods actually present per cluster when the grid is incomplete.
   """
 
   design: DesignStats
@@ -224,10 +255,14 @@ class DesignParameters:
     return self.shares.outcome_sd
 
   def summarize_kwargs(self) -> dict[str, float | int]:
-    """Keyword arguments for `summarize_estimator_variance` and `summarize_power`."""
+    """Keyword arguments for `summarize_estimator_variance` and `summarize_power`.
+
+    `num_time_periods` is `design.effective_num_time_periods`, so that
+    `num_clusters * num_time_periods` equals the number of cells present.
+    """
     return {
       "num_clusters": self.num_clusters,
-      "num_time_periods": self.num_time_periods,
+      "num_time_periods": self.design.effective_num_time_periods,
       "mean_obs_per_cell": self.mean_obs_per_cell,
       "cell_size_cv": self.cell_size_cv,
       "between_cell_variance_share": self.between_cell_variance_share,

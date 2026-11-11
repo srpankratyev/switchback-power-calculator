@@ -98,6 +98,11 @@ result, parameters, diagnostics = power_from_data(df, treatment_effect=50)
 
 Functions are layered: clean data → infer parameters → estimate variance → estimate power. `within_cell_variance_share` defaults to `1 - between_cell_variance_share` when omitted.
 
+How the data API reads a pre-period extract:
+
+- **Only cells with data count as randomizations.** If some cluster × time cells are empty, or are dropped by `min_cell_count`, the variance is divided by the number of cells present (`DesignStats.n_cells`), not by `num_clusters × num_time_periods`, and `DataDiagnostics.warnings` says how many cells are absent. `min_cell_count` therefore describes an experiment whose analysis also drops those cells. To unpack inferred parameters into the parameter API, use `parameters.summarize_kwargs()`, which passes the periods actually present per cluster.
+- **Variance shares are variance components, not raw sums of squares.** The between-cell share is the one-way ANOVA estimate with the cell as the group. The raw ratio `SS_cell / SS_total` counts within-cell noise in the cell means as between-cell variance and overstates the share by about `(1 − share) / mean_obs_per_cell`. The cluster / time / interaction split in `VarianceShares` is the raw, descriptive partition.
+
 **Data**
 
 ```python
